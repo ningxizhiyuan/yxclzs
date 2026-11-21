@@ -1,0 +1,241 @@
+-- ============================================================
+-- 数据库完整重建脚本（适用于 openGauss / PostgreSQL）
+-- 包含：users, admin, boxlist, class, inventory, feedback, records
+-- 执行前请确保已有数据库并切换至目标库
+-- ============================================================
+
+-- 删除已存在的表（慎用！会清空所有数据）
+DROP TABLE IF EXISTS records CASCADE;
+DROP TABLE IF EXISTS feedback CASCADE;
+DROP TABLE IF EXISTS inventory CASCADE;
+DROP TABLE IF EXISTS class CASCADE;
+DROP TABLE IF EXISTS boxlist CASCADE;
+DROP TABLE IF EXISTS users CASCADE;
+DROP TABLE IF EXISTS admin CASCADE;
+
+
+-- ============================================================
+-- 1. users 表（用户表）
+-- ============================================================
+CREATE TABLE users (
+    id          SERIAL      NOT NULL,
+    username    VARCHAR(100) NOT NULL,
+    identity    SMALLINT    NOT NULL DEFAULT 0,
+    unit        VARCHAR(100) NOT NULL,
+    workshop    VARCHAR(100) NOT NULL,
+    team        VARCHAR(100) NOT NULL,
+    name        VARCHAR(100) NOT NULL,
+    area        VARCHAR(100) NOT NULL,
+    security_pin VARCHAR(20) DEFAULT NULL,   -- 二次验证密码（明文）
+    PRIMARY KEY (id)
+);
+COMMENT ON COLUMN users.id          IS '';
+COMMENT ON COLUMN users.username    IS '';
+COMMENT ON COLUMN users.identity    IS '0普通 1班组长 2管理员';
+COMMENT ON COLUMN users.unit        IS '';
+COMMENT ON COLUMN users.workshop    IS '';
+COMMENT ON COLUMN users.team        IS '';
+COMMENT ON COLUMN users.name        IS '';
+COMMENT ON COLUMN users.area        IS '';
+COMMENT ON COLUMN users.security_pin IS '管理员二次验证PIN码（明文）';
+
+-- 唯一索引：username
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users (username);
+
+-- 普通索引：区域+班组
+CREATE INDEX IF NOT EXISTS idx_users_area_team ON users (unit, workshop, area, team);
+
+
+-- ============================================================
+-- 2. admin 表（后台管理员表）
+-- ============================================================
+CREATE TABLE admin (
+    id          SERIAL       NOT NULL,
+    username    VARCHAR(100) NOT NULL,
+    password    VARCHAR(100) NOT NULL,   -- 建议改为加密存储
+    unit        VARCHAR(100) NOT NULL,
+    workshop    VARCHAR(100) NOT NULL,
+    PRIMARY KEY (id)
+);
+COMMENT ON COLUMN admin.id        IS '';
+COMMENT ON COLUMN admin.username  IS '';
+COMMENT ON COLUMN admin.password  IS '';
+COMMENT ON COLUMN admin.unit      IS '';
+COMMENT ON COLUMN admin.workshop  IS '';
+
+-- 唯一索引：username
+CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_username ON admin (username);
+
+
+-- ============================================================
+-- 3. boxlist 表（箱号表）
+-- ============================================================
+CREATE TABLE boxlist (
+    id          SERIAL       NOT NULL,
+    boxnumber   INTEGER      NOT NULL,
+    unit        VARCHAR(100) NOT NULL,
+    workshop    VARCHAR(100) NOT NULL,
+    area        VARCHAR(100) NOT NULL,
+    location    VARCHAR(100) NOT NULL,
+    PRIMARY KEY (id)
+);
+COMMENT ON COLUMN boxlist.id          IS '';
+COMMENT ON COLUMN boxlist.boxnumber   IS '';
+COMMENT ON COLUMN boxlist.unit        IS '';
+COMMENT ON COLUMN boxlist.workshop    IS '';
+COMMENT ON COLUMN boxlist.area        IS '';
+COMMENT ON COLUMN boxlist.location    IS '';
+
+-- 唯一约束：同一(unit, workshop, area)下箱号唯一
+ALTER TABLE boxlist ADD CONSTRAINT uk_boxlist_unit_workshop_area_boxnumber 
+    UNIQUE (boxnumber, unit, workshop, area);
+
+-- 索引
+CREATE INDEX IF NOT EXISTS idx_boxlist_unit_workshop_area ON boxlist (unit, workshop, area);
+CREATE INDEX IF NOT EXISTS idx_boxlist_boxnumber ON boxlist (boxnumber);
+
+
+-- ============================================================
+-- 4. class 表（物料种类表）
+-- ============================================================
+CREATE TABLE class (
+    id          SERIAL       NOT NULL,
+    name        VARCHAR(100) NOT NULL,
+    unit        VARCHAR(100) NOT NULL,
+    workshop    VARCHAR(100) NOT NULL,
+    area        VARCHAR(100) NOT NULL,
+    PRIMARY KEY (id)
+);
+COMMENT ON COLUMN class.id        IS '';
+COMMENT ON COLUMN class.name      IS '';
+COMMENT ON COLUMN class.unit      IS '';
+COMMENT ON COLUMN class.workshop  IS '';
+COMMENT ON COLUMN class.area      IS '';
+
+-- 唯一约束：同一(unit, workshop, area)下物料名称唯一
+ALTER TABLE class ADD CONSTRAINT uk_class_name_unit_workshop_area 
+    UNIQUE (name, unit, workshop, area);
+
+-- 索引
+CREATE INDEX IF NOT EXISTS idx_class_unit_workshop_area ON class (unit, workshop, area);
+
+-- 可选：支持中文模糊搜索的 pg_trgm 索引（需要先安装扩展）
+-- CREATE EXTENSION IF NOT EXISTS pg_trgm;
+-- CREATE INDEX IF NOT EXISTS idx_class_name_trgm ON class USING gin (name gin_trgm_ops);
+
+
+-- ============================================================
+-- 5. inventory 表（库存表）
+-- ============================================================
+CREATE TABLE inventory (
+    id               SERIAL       NOT NULL,
+    boxnumber        INTEGER      NOT NULL,
+    name             VARCHAR(100) NOT NULL,
+    "Remaining"      INTEGER      NOT NULL,   -- 注意大写 R
+    quota            INTEGER      NOT NULL,
+    unit             VARCHAR(100) NOT NULL,
+    workshop         VARCHAR(100) NOT NULL,
+    area             VARCHAR(100) NOT NULL,
+    alert_threshold  INTEGER      NOT NULL DEFAULT 5,
+    PRIMARY KEY (id)
+);
+COMMENT ON COLUMN inventory.id               IS '';
+COMMENT ON COLUMN inventory.boxnumber        IS '';
+COMMENT ON COLUMN inventory.name             IS '';
+COMMENT ON COLUMN inventory."Remaining"      IS '';
+COMMENT ON COLUMN inventory.quota            IS '';
+COMMENT ON COLUMN inventory.unit             IS '';
+COMMENT ON COLUMN inventory.workshop         IS '';
+COMMENT ON COLUMN inventory.area             IS '';
+COMMENT ON COLUMN inventory.alert_threshold  IS '库存预警阈值，剩余数量低于该值时预警';
+
+-- 唯一约束：同一(boxnumber, name, unit, workshop, area)下唯一
+ALTER TABLE inventory ADD CONSTRAINT uk_inventory_boxname 
+    UNIQUE (boxnumber, name, unit, workshop, area);
+
+-- 索引
+CREATE INDEX IF NOT EXISTS idx_inventory_boxnumber ON inventory (boxnumber);
+CREATE INDEX IF NOT EXISTS idx_inventory_unit_workshop_area ON inventory (unit, workshop, area);
+-- 部分索引：仅预警记录
+CREATE INDEX IF NOT EXISTS idx_inventory_remaining_alert 
+    ON inventory (unit, workshop, area, "Remaining", alert_threshold) 
+    WHERE "Remaining" <= alert_threshold;
+
+
+-- ============================================================
+-- 6. feedback 表（反馈表）
+-- ============================================================
+CREATE TABLE feedback (
+    id          SERIAL        NOT NULL,
+    boxnumber   VARCHAR(50)   NOT NULL,
+    type        VARCHAR(20)   NOT NULL,
+    description TEXT          DEFAULT NULL,
+    unit        VARCHAR(100)  NOT NULL,
+    workshop    VARCHAR(100)  NOT NULL,
+    area        VARCHAR(100)  NOT NULL,
+    status      VARCHAR(20)   DEFAULT 'pending',
+    created_at  TIMESTAMPTZ   DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMPTZ   DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id)
+);
+COMMENT ON COLUMN feedback.id          IS '';
+COMMENT ON COLUMN feedback.boxnumber   IS '';
+COMMENT ON COLUMN feedback.type        IS '';
+COMMENT ON COLUMN feedback.description IS '';
+COMMENT ON COLUMN feedback.unit        IS '';
+COMMENT ON COLUMN feedback.workshop    IS '';
+COMMENT ON COLUMN feedback.area        IS '';
+COMMENT ON COLUMN feedback.status      IS '';
+COMMENT ON COLUMN feedback.created_at  IS '';
+COMMENT ON COLUMN feedback.updated_at  IS '';
+
+-- CHECK 约束：status 仅允许 pending / resolved
+ALTER TABLE feedback ADD CONSTRAINT chk_feedback_status 
+    CHECK (status IN ('pending', 'resolved'));
+
+-- 索引
+CREATE INDEX IF NOT EXISTS idx_feedback_unit_workshop_status_created 
+    ON feedback (unit, workshop, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_feedback_boxnumber ON feedback (boxnumber);
+CREATE INDEX IF NOT EXISTS idx_feedback_unit_workshop_area 
+    ON feedback (unit, workshop, area);
+
+-- ============================================================
+-- 7. records 表（使用记录表）
+-- ============================================================
+CREATE TABLE records (
+    id            SERIAL         NOT NULL,
+    username      VARCHAR(10)    NOT NULL,
+    unit          VARCHAR(100)   NOT NULL,
+    workshop      VARCHAR(100)   NOT NULL,
+    team          VARCHAR(100)   NOT NULL,
+    boxnumber     INTEGER        NOT NULL,
+    material_name VARCHAR(100)   NOT NULL,
+    quantity      INTEGER        NOT NULL,
+    usage_time    TIMESTAMPTZ    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    area          VARCHAR(100)   NOT NULL,
+    PRIMARY KEY (id)
+);
+COMMENT ON COLUMN records.id            IS '主键ID';
+COMMENT ON COLUMN records.username      IS '员工编号';
+COMMENT ON COLUMN records.unit          IS '单位';
+COMMENT ON COLUMN records.workshop      IS '车间';
+COMMENT ON COLUMN records.team          IS '班组';
+COMMENT ON COLUMN records.boxnumber     IS '材料箱号';
+COMMENT ON COLUMN records.material_name IS '材料名称';
+COMMENT ON COLUMN records.quantity      IS '使用数量';
+COMMENT ON COLUMN records.usage_time    IS '使用时间';
+COMMENT ON COLUMN records.area          IS '';
+
+-- 索引（覆盖常用查询组合）
+CREATE INDEX IF NOT EXISTS idx_records_stats 
+    ON records (unit, workshop, area, team, usage_time, material_name);
+CREATE INDEX IF NOT EXISTS idx_records_username_time 
+    ON records (username, usage_time);
+CREATE INDEX IF NOT EXISTS idx_records_boxnumber_time 
+    ON records (boxnumber, usage_time);
+CREATE INDEX IF NOT EXISTS idx_records_material_time 
+    ON records (material_name, usage_time);
+CREATE INDEX IF NOT EXISTS idx_records_area_time 
+    ON records (area, usage_time);
+
